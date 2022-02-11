@@ -1,0 +1,6 @@
+github.com/bigmate/app v0.0.0-20220211170402-56cacfb72780 h1:zF+wsQzrypZIw82XShN7VIvL1sxA1YskfOA9BU/uqz0=
+github.com/bigmate/app v0.0.0-20220211170402-56cacfb72780/go.mod h1:2ceu1bQGh87haI4hvc5fyrjAOcl6IWtdqy680kmcU2k=
+github.com/hashicorp/errwrap v1.0.0 h1:hLrqtEDnRye3+sgx6z4qVLNuviH3MR5aQ0ykNJa/UYA=
+github.com/hashicorp/errwrap v1.0.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
+github.com/hashicorp/go-multierror v1.1.1 h1:H5DkEtf6CXdFp0N0Em5UCwQpXMWke8IA0+lD48awMYo=
+github.com/hashicorp/go-multierror v1.1.1/go.mod h1:iw975J/qwKPdAO1clOe2L8331t/9/fmwbPZ6JB6eMoM=
