@@ -1,25 +1,22 @@
-package closer
+package closer //nolint // api restrictions
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
-	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNew(t *testing.T) {
-	ctx := context.Background()
-	logger := stdErrLogger{}
+	lg := stdErrLogger()
 	closerFunc := func() error {
 		return errors.New("connection closed")
 	}
 
 	c := New(
-		WithContext(ctx),
-		WithLogger(logger),
+		WithLogger(lg),
 		WithCloser(closerFunc),
 	)
 
@@ -29,11 +26,7 @@ func TestNew(t *testing.T) {
 		t.Fatalf("expected *closer implementation, got: %T", c)
 	}
 
-	if !reflect.DeepEqual(ctx, closerObj.ctx) {
-		t.Error("invalid context stored")
-	}
-
-	if !reflect.DeepEqual(logger, closerObj.logger) {
+	if !reflect.DeepEqual(lg, closerObj.logger) {
 		t.Error("invalid logger stored")
 	}
 
@@ -42,56 +35,103 @@ func TestNew(t *testing.T) {
 	}
 }
 
-type testBufLogger struct {
-	bytes.Buffer
-}
-
-func (t *testBufLogger) Errorf(_ context.Context, format string, args ...interface{}) {
-	t.WriteString(fmt.Sprintf(format, args...))
-	t.WriteByte('\n')
-}
-
 func TestReplaces(t *testing.T) {
-	ctxFormer, ctxLater := context.TODO(), context.Background()
-	ReplaceContext(ctxFormer)
-	ReplaceContext(ctxLater)
-	if !reflect.DeepEqual(ctxFormer, cl.ctx) {
-		t.Errorf("expected TODO context, got: %v", cl.ctx)
-	}
+	ReplaceLogger(nil)
+	ReplaceLogger(stdErrLogger())
 
-	ReplaceLogger(&testBufLogger{})
-	ReplaceLogger(stdErrLogger{})
-	if reflect.DeepEqual(cl.logger, stdErrLogger{}) {
-		t.Errorf("expected testBufLogger logger, got: %v", cl.logger)
+	if reflect.DeepEqual(globalCloser.logger, stdErrLogger()) {
+		t.Errorf("expected testBufLogger logger, got: %v", globalCloser.logger)
 	}
 }
 
-func TestAddClose(t *testing.T) {
-	logger := &testBufLogger{}
-	ReplaceLogger(logger)
+func TestAdd(t *testing.T) {
+	closerFunc := func() error {
+		return nil
+	}
+
+	Add(closerFunc)
+	Add(closerFunc)
+	Add(closerFunc)
+
+	if len(globalCloser.closers) != 3 {
+		t.Errorf("expected exacly 3 closer, have: %v", len(globalCloser.closers))
+	}
+}
+
+type nopWriter struct{}
+
+func (nopWriter) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+func TestCloseTimeout(t *testing.T) {
+	counter := uint32(0)
 
 	closerFunc := func() error {
+		time.Sleep(time.Second * 10)
+		atomic.AddUint32(&counter, 1)
+
 		return errors.New("connection closed")
 	}
 
-	Add(closerFunc)
-	Add(closerFunc)
-	Add(closerFunc)
+	c := New(
+		WithCloser(closerFunc),
+		WithCloser(closerFunc),
+		WithCloser(closerFunc),
+		WithLogger(logger{nopWriter{}}),
+	)
 
-	if len(cl.closers) != 3 {
-		t.Errorf("expected exacly 3 closer, have: %v", len(cl.closers))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	if err := c.Close(ctx); err != ctx.Err() {
+		t.Errorf("expcted error, got: %v", err)
 	}
 
-	Close()
-	Close()
-	Close()
+	if err := c.Close(ctx); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 
-	logs := strings.Split(strings.TrimRight(logger.String(), "\n"), "\n")
+	if err := c.Close(ctx); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 
-	if len(logs) != 3 {
-		t.Errorf("expected exactly 3 lines to be logged, got: %v", len(logs))
-		for _, log := range logs {
-			t.Log(log)
-		}
+	readCounter := atomic.LoadUint32(&counter)
+	if readCounter != 0 {
+		t.Errorf("expected counter to be 0, got: %v", readCounter)
+	}
+}
+
+func TestCloseWithoutTimeout(t *testing.T) {
+	counter := uint32(0)
+	expected := 10
+
+	closerFunc := func() error {
+		time.Sleep(time.Second * 2)
+		atomic.AddUint32(&counter, 1)
+
+		return nil
+	}
+
+	c := New(WithLogger(logger{nopWriter{}}))
+
+	for i := 0; i < expected; i++ {
+		c.Add(closerFunc)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	if err := c.Close(ctx); err != ctx.Err() {
+		t.Errorf("expected error, got: %v", err)
+	}
+
+	if err := c.Close(ctx); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	readCounter := atomic.LoadUint32(&counter)
+	if readCounter != uint32(expected) {
+		t.Errorf("expected counter to be %v, got: %v", expected, readCounter)
 	}
 }

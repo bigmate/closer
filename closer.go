@@ -6,26 +6,16 @@ import (
 )
 
 type Closer interface {
-	Close()
 	Add(closer func() error)
-	Run(ctx context.Context) error
+	Close(ctx context.Context) error
 }
 
 var (
-	onceContext sync.Once
-	onceLogger  sync.Once
-	cl          *closer
+	replaceOnce  sync.Once
+	globalCloser = &closer{logger: stdErrLogger()}
 )
 
-func init() {
-	cl = &closer{
-		ctx:    context.Background(),
-		logger: stdErrLogger{},
-	}
-}
-
 type closer struct {
-	ctx       context.Context
 	rw        sync.RWMutex
 	closeOnce sync.Once
 	closers   []func() error
@@ -36,7 +26,7 @@ type Option func(c *closer)
 
 func WithCloser(c func() error) Option {
 	return func(cl *closer) {
-		cl.closers = append(cl.closers, c)
+		cl.closers = append([]func() error{c}, cl.closers...)
 	}
 }
 
@@ -46,18 +36,9 @@ func WithLogger(logger Logger) Option {
 	}
 }
 
-func WithContext(ctx context.Context) Option {
-	return func(c *closer) {
-		c.ctx = ctx
-	}
-}
-
-// New is a constructor of closer
+// New is a constructor of closer.
 func New(options ...Option) Closer {
-	c := &closer{
-		ctx:    context.Background(),
-		logger: stdErrLogger{},
-	}
+	c := &closer{logger: stdErrLogger()}
 
 	for _, apply := range options {
 		apply(c)
@@ -66,68 +47,88 @@ func New(options ...Option) Closer {
 	return c
 }
 
-func (c *closer) Close() {
+func (c *closer) Close(ctx context.Context) (err error) {
 	c.closeOnce.Do(func() {
+		err = c.close(ctx)
+	})
+
+	return err
+}
+
+func (c *closer) close(ctx context.Context) error {
+	done := make(chan struct{}, 1)
+
+	go func() {
 		c.rw.RLock()
 		defer c.rw.RUnlock()
 
-		for _, closeResource := range c.closers {
-			if err := closeResource(); err != nil {
-				c.logger.Errorf(c.ctx, "failed to close: %v", err)
-			}
+		wg := sync.WaitGroup{}
+
+		for _, f := range c.closers {
+			wg.Add(1)
+
+			go func(closeFunc func() error) {
+				defer wg.Done()
+
+				if err := closeFunc(); err != nil {
+					c.logger.Errorf("failed to close: %v", err)
+				}
+			}(f)
 		}
-	})
+
+		wg.Wait()
+
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		return nil
+	}
 }
 
 func (c *closer) Add(closer func() error) {
 	c.rw.Lock()
-	c.closers = append(c.closers, closer)
+	c.closers = append([]func() error{closer}, c.closers...)
 	c.rw.Unlock()
 }
 
-// Run implements app.App interface
-func (c *closer) Run(ctx context.Context) error {
-	<-ctx.Done()
-	c.Close()
-	return nil
-}
-
 // Add adds closer func to the global Closer
-// that are run in FIFO order when Close is called.
+// that are run in LIFO order when Close is called.
 // Caution: Try not to pass closer func for Logger that is used by Closer,
 // otherwise if logger closed before other closers, there is a risk calling closed logger
-// if any error occurs down the way closing other closers
+// if any error occurs down the way closing other closers or Add Logger closer first.
 func Add(closer func() error) {
-	cl.Add(closer)
+	globalCloser.Add(closer)
 }
 
 // Close closes global Closer
-// Caution: Only single call makes an affect
-func Close() {
-	cl.Close()
+// Caution: Only single call makes an affect.
+func Close(ctx context.Context) error {
+	return globalCloser.Close(ctx)
+}
+
+func CloseWithLogger(ctx context.Context, logger Logger) error {
+	if logger != nil {
+		ReplaceLogger(logger)
+	}
+
+	return Close(ctx)
 }
 
 // ReplaceLogger replaces Logger of global Closer
-// Caution: Only single call makes an affect
+// Caution: Only single call makes an affect.
 func ReplaceLogger(logger Logger) {
-	onceLogger.Do(func() {
-		cl.rw.Lock()
-		cl.logger = logger
-		cl.rw.Unlock()
+	replaceOnce.Do(func() {
+		globalCloser.rw.Lock()
+		globalCloser.logger = logger
+		globalCloser.rw.Unlock()
 	})
 }
 
-// ReplaceContext replaces context.Context of global Closer
-// Caution: Only single call makes an affect
-func ReplaceContext(ctx context.Context) {
-	onceContext.Do(func() {
-		cl.rw.Lock()
-		cl.ctx = ctx
-		cl.rw.Unlock()
-	})
-}
-
-// GlobalCloser returns globally initialized Closer
-func GlobalCloser() Closer {
-	return cl
+// Global returns globally initialized Closer.
+func Global() Closer {
+	return globalCloser
 }

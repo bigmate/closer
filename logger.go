@@ -1,17 +1,24 @@
 package closer
 
 import (
-	"context"
 	"fmt"
+	"io"
 	"os"
 )
 
 type Logger interface {
-	Errorf(ctx context.Context, format string, args ...interface{})
+	Errorf(format string, args ...interface{})
 }
 
-type stdErrLogger struct{}
+func stdErrLogger() Logger {
+	return logger{os.Stderr}
+}
 
-func (s stdErrLogger) Errorf(_ context.Context, format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, format, args...)
+type logger struct {
+	io.Writer
+}
+
+func (l logger) Errorf(format string, args ...interface{}) {
+	fmt.Fprintf(l, format, args...)
+	fmt.Fprintln(l)
 }
