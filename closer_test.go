@@ -1,61 +1,73 @@
-package closer //nolint // api restrictions
+package closer_test
 
 import (
 	"context"
-	"errors"
-	"reflect"
+	"fmt"
+	"github.com/bigmate/closer"
+	"io"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestNew(t *testing.T) {
-	lg := stdErrLogger()
-	closerFunc := func() error {
-		return errors.New("connection closed")
+type logger struct {
+	mu   sync.Mutex
+	dest io.Writer
+}
+
+func (l *logger) Errorf(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	fmt.Fprintf(l.dest, format, args...)
+	fmt.Fprintln(l.dest)
+}
+
+func ensureWithLogger(t *testing.T, linesCount int, buf *strings.Builder) {
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+
+	if len(lines) != linesCount {
+		t.Fatalf("expected %v lines got: %v", linesCount, len(lines))
 	}
 
-	c := New(
-		WithLogger(lg),
-		WithCloser(closerFunc),
+	for _, line := range lines {
+		if line != "failed to close: connection closed" {
+			t.Errorf("unexpected log: %s", line)
+		}
+	}
+}
+
+func ensureNoError(t *testing.T, err error) {
+	if err != nil {
+		t.Errorf("unexpected err: %v", err)
+	}
+}
+
+func ensureError(t *testing.T, err error) {
+	if err == nil {
+		t.Errorf("expected err, got nil")
+	}
+}
+
+func closerErrorFunc() error {
+	return fmt.Errorf("connection closed")
+}
+
+func TestOptions(t *testing.T) {
+	buf := &strings.Builder{}
+	log := &logger{dest: buf}
+
+	c := closer.New(
+		closer.WithLogger(log),
+		closer.WithCloser(closerErrorFunc),
 	)
 
-	closerObj, ok := c.(*closer)
+	c.Add(closerErrorFunc)
 
-	if !ok {
-		t.Fatalf("expected *closer implementation, got: %T", c)
-	}
-
-	if !reflect.DeepEqual(lg, closerObj.logger) {
-		t.Error("invalid logger stored")
-	}
-
-	if len(closerObj.closers) != 1 {
-		t.Fatalf("expected exactly 1 closer func to be stored, got: %v", len(closerObj.closers))
-	}
-}
-
-func TestReplaces(t *testing.T) {
-	ReplaceLogger(nil)
-	ReplaceLogger(stdErrLogger())
-
-	if reflect.DeepEqual(globalCloser.logger, stdErrLogger()) {
-		t.Errorf("expected testBufLogger logger, got: %v", globalCloser.logger)
-	}
-}
-
-func TestAdd(t *testing.T) {
-	closerFunc := func() error {
-		return nil
-	}
-
-	Add(closerFunc)
-	Add(closerFunc)
-	Add(closerFunc)
-
-	if len(globalCloser.closers) != 3 {
-		t.Errorf("expected exacly 3 closer, have: %v", len(globalCloser.closers))
-	}
+	ensureNoError(t, c.Close(context.Background()))
+	ensureWithLogger(t, 2, buf)
 }
 
 type nopWriter struct{}
@@ -71,30 +83,22 @@ func TestCloseTimeout(t *testing.T) {
 		time.Sleep(time.Second * 10)
 		atomic.AddUint32(&counter, 1)
 
-		return errors.New("connection closed")
+		return fmt.Errorf("connection closed")
 	}
 
-	c := New(
-		WithCloser(closerFunc),
-		WithCloser(closerFunc),
-		WithCloser(closerFunc),
-		WithLogger(logger{nopWriter{}}),
+	c := closer.New(
+		closer.WithCloser(closerFunc),
+		closer.WithCloser(closerFunc),
+		closer.WithCloser(closerFunc),
+		closer.WithLogger(&logger{dest: nopWriter{}}),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
-	if err := c.Close(ctx); err != ctx.Err() {
-		t.Errorf("expcted error, got: %v", err)
-	}
-
-	if err := c.Close(ctx); err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-
-	if err := c.Close(ctx); err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
+	ensureError(t, c.Close(ctx))
+	ensureNoError(t, c.Close(ctx))
+	ensureNoError(t, c.Close(ctx))
 
 	readCounter := atomic.LoadUint32(&counter)
 	if readCounter != 0 {
@@ -113,7 +117,7 @@ func TestCloseWithoutTimeout(t *testing.T) {
 		return nil
 	}
 
-	c := New(WithLogger(logger{nopWriter{}}))
+	c := closer.New(closer.WithLogger(&logger{dest: nopWriter{}}))
 
 	for i := 0; i < expected; i++ {
 		c.Add(closerFunc)
@@ -122,16 +126,42 @@ func TestCloseWithoutTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 
-	if err := c.Close(ctx); err != ctx.Err() {
-		t.Errorf("expected error, got: %v", err)
-	}
-
-	if err := c.Close(ctx); err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
+	ensureNoError(t, c.Close(ctx))
+	ensureNoError(t, c.Close(ctx))
+	ensureNoError(t, c.Close(ctx))
 
 	readCounter := atomic.LoadUint32(&counter)
 	if readCounter != uint32(expected) {
 		t.Errorf("expected counter to be %v, got: %v", expected, readCounter)
 	}
+}
+
+func TestReconfigure(t *testing.T) {
+	buf := &strings.Builder{}
+	log := &logger{dest: buf}
+
+	closer.Reconfigure(
+		closer.WithCloser(closerErrorFunc),
+		closer.WithCloser(closerErrorFunc),
+		closer.WithCloser(closerErrorFunc),
+		closer.WithLogger(log),
+	)
+
+	ensureNoError(t, closer.Close(context.Background()))
+	ensureWithLogger(t, 3, buf)
+}
+
+func TestAdd(t *testing.T) {
+	buf := &strings.Builder{}
+	log := &logger{dest: buf}
+	count := 17
+
+	closer.Reconfigure(closer.WithLogger(log))
+
+	for i := 0; i < count; i++ {
+		closer.Add(closerErrorFunc)
+	}
+
+	ensureNoError(t, closer.Close(context.Background()))
+	ensureWithLogger(t, count, buf)
 }

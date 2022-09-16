@@ -5,13 +5,17 @@ import (
 	"sync"
 )
 
+//Adder is only for dependency injection
+type Adder interface {
+	Add(closer func() error)
+}
+
 type Closer interface {
 	Add(closer func() error)
 	Close(ctx context.Context) error
 }
 
 var (
-	replaceOnce  sync.Once
 	globalCloser = &closer{logger: stdErrLogger()}
 )
 
@@ -89,6 +93,15 @@ func (c *closer) close(ctx context.Context) error {
 	}
 }
 
+func (c *closer) reconfigure(options ...Option) {
+	c.rw.Lock()
+	defer c.rw.Unlock()
+
+	for _, apply := range options {
+		apply(c)
+	}
+}
+
 func (c *closer) Add(closer func() error) {
 	c.rw.Lock()
 	c.closers = append([]func() error{closer}, c.closers...)
@@ -110,22 +123,9 @@ func Close(ctx context.Context) error {
 	return globalCloser.Close(ctx)
 }
 
-func CloseWithLogger(ctx context.Context, logger Logger) error {
-	if logger != nil {
-		ReplaceLogger(logger)
-	}
-
-	return Close(ctx)
-}
-
-// ReplaceLogger replaces Logger of global Closer
-// Caution: Only single call makes an affect.
-func ReplaceLogger(logger Logger) {
-	replaceOnce.Do(func() {
-		globalCloser.rw.Lock()
-		globalCloser.logger = logger
-		globalCloser.rw.Unlock()
-	})
+// Reconfigure global closer with provided options
+func Reconfigure(options ...Option) {
+	globalCloser.reconfigure(options...)
 }
 
 // Global returns globally initialized Closer.

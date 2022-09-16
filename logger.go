@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 type Logger interface {
@@ -11,14 +12,18 @@ type Logger interface {
 }
 
 func stdErrLogger() Logger {
-	return logger{os.Stderr}
+	return &logger{dest: os.Stderr}
 }
 
 type logger struct {
-	io.Writer
+	mu   sync.Mutex
+	dest io.Writer
 }
 
-func (l logger) Errorf(format string, args ...interface{}) {
-	fmt.Fprintf(l, format, args...)
-	fmt.Fprintln(l)
+func (l *logger) Errorf(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	fmt.Fprintf(l.dest, format, args...)
+	fmt.Fprintln(l.dest)
 }
